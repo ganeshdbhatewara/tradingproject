@@ -107,8 +107,8 @@ def equity(portfolio: Portfolio, prices: dict[str, float]) -> float:
         if p.book == "spot":
             value += p.quantity * mark
         else:
-            # Both non-spot books represent short exposure in this MVP.
-            value += p.margin_inr + p.quantity * (mark - p.entry_price)
+            # Both non-spot books represent short exposure: rising marks lose value.
+            value += p.margin_inr + p.quantity * (p.entry_price - mark)
     return value
 
 
@@ -193,3 +193,4 @@ def select_strategy(regime: str, trend: float, volatility: float,
     else:
         strategy, why = "Momentum", "No strong trend or range signal; use momentum confirmation."
     return {"strategy": strategy, "reason": why}
+
