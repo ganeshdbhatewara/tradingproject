@@ -30,10 +30,28 @@ def test_costs_funding_and_liquidation():
     pos = open_position(p, "BTC/INR", "futures_hedge", "short", 1000, 1_000_000,
                         Costs(fee_rate=.001, slippage_bps=0), hedge_ratio=1)
     before = p.cash_inr
-    assert charge_funding(p, {"BTC/INR": 1_000_000}, periods=2, rate_per_8h=.001) == pytest.approx(2)
-    assert p.cash_inr == pytest.approx(before - 2)
+    # A positive funding rate pays simulated shorts; a negative one charges them.
+    assert charge_funding(p, {"BTC/INR": 1_000_000}, periods=2, rate_per_8h=.001) == pytest.approx(-2)
+    assert p.cash_inr == pytest.approx(before + 2)
+    assert charge_funding(p, {"BTC/INR": 1_000_000}, periods=2, rate_per_8h=-.001) == pytest.approx(2)
+    assert p.cash_inr == pytest.approx(before)
     assert liquidation_price(pos) > pos.entry_price
     assert slipped_price(100, "buy", 10) > 100
+
+
+def test_short_mark_to_market_and_reject_invalid_inputs():
+    p = Portfolio()
+    pos = open_position(p, "BTC/INR", "futures_hedge", "short", 1000, 100_000,
+                        Costs(slippage_bps=0), hedge_ratio=1)
+    entry_equity = equity(p, {"BTC/INR": pos.entry_price})
+    assert equity(p, {"BTC/INR": pos.entry_price * 1.1}) < entry_equity
+    assert equity(p, {"BTC/INR": pos.entry_price * 0.9}) > entry_equity
+    with pytest.raises(ValueError):
+        open_position(p, "BTC/INR", "unexpected", "short", 1000, 100_000)
+    with pytest.raises(ValueError):
+        open_position(p, "BTC/INR", "spot", "long", float("nan"), 100_000)
+    with pytest.raises(ValueError):
+        charge_funding(p, {}, rate_per_8h=.001)
 
 
 def test_strategy_explains_and_manual_choice():
