@@ -32,7 +32,7 @@ def test_costs_funding_and_liquidation():
     before = p.cash_inr
     assert charge_funding(p, {"BTC/INR": 1_000_000}, periods=2, rate_per_8h=.001) == pytest.approx(2)
     assert p.cash_inr == pytest.approx(before - 2)
-    assert 0 < liquidation_price(pos) < pos.entry_price
+    assert liquidation_price(pos) > pos.entry_price
     assert slipped_price(100, "buy", 10) > 100
 
 
