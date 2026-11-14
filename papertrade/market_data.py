@@ -15,6 +15,24 @@ def spot_ohlc(symbol: str, days: int = 30) -> list[list[float]]:
 
 
 def futures_data_notice() -> dict:
-    """This MVP has no INR-denominated futures feed. Never substitute simulated data silently."""
-    return {"available": False, "source_type": "unavailable",
-            "message": "No verified INR futures feed is configured. Internal hedge book is simulated; do not present it as exchange futures data."}
+    """Describe the real USD-margined feed and distinguish it from the INR paper book."""
+    return {"available": True, "source_type": "actual_exchange_futures", "exchange": "Binance USDⓈ-M",
+            "quote_currency": "USDT", "message": "Actual Binance USDⓈ-M futures market data is quoted in USDT. It is not INR-denominated; the paper hedge book remains simulated."}
+
+
+def futures_snapshot(symbol: str) -> dict:
+    """Public mark/funding data only; no authentication or order endpoints are used."""
+    pairs = {"BTC/INR": "BTCUSDT", "ETH/INR": "ETHUSDT"}
+    if symbol not in pairs:
+        raise ValueError("Only BTC/INR and ETH/INR equivalents are supported")
+    response = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex",
+                            params={"symbol": pairs[symbol]}, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    return {"underlying": symbol, "contract_symbol": data["symbol"],
+            "mark_price_usdt": float(data["markPrice"]),
+            "index_price_usdt": float(data["indexPrice"]),
+            "funding_rate": float(data["lastFundingRate"]),
+            "next_funding_time_ms": int(data["nextFundingTime"]),
+            "source_type": "actual_exchange_futures", "exchange": "Binance USDⓈ-M",
+            "quote_currency": "USDT", "retrieved_at_ms": int(data["time"])}
