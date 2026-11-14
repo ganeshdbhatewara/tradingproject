@@ -1,0 +1,2 @@
+# tradingproject
+trading project   
