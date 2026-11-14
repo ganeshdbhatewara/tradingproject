@@ -16,8 +16,8 @@ def spot_ohlc(symbol: str, days: int = 30) -> list[list[float]]:
 
 def futures_data_notice() -> dict:
     """Describe the real USD-margined feed and distinguish it from the INR paper book."""
-    return {"available": True, "source_type": "actual_exchange_futures", "exchanges": ["Binance USDⓈ-M", "Bybit linear perpetual"],
-            "quote_currency": "USDT", "message": "Public Binance USDⓈ-M or Bybit linear futures market data is quoted in USDT. It is not INR-denominated; the paper hedge book remains simulated."}
+    return {"configured": True, "source_type": "actual_exchange_futures", "exchanges": ["Binance USDⓈ-M", "Bybit linear perpetual"],
+            "quote_currency": "USDT", "message": "Actual public Binance USDⓈ-M/Bybit linear futures adapters are configured in USDT. Network or regional restrictions may make the live feed unavailable; the paper hedge book remains simulated."}
 
 
 def futures_snapshot(symbol: str) -> dict:

@@ -48,7 +48,7 @@ def test_market_adapters_keep_actual_futures_data_labeled(monkeypatch):
     result = futures_snapshot("BTC/INR")
     assert result["source_type"] == "actual_exchange_futures"
     assert result["quote_currency"] == "USDT" and result["mark_price_usdt"] == 50000
-    assert futures_data_notice()["available"]
+    assert futures_data_notice()["configured"]
     with pytest.raises(ValueError):
         spot_ohlc("XRP/INR")
 
