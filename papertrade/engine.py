@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import math
 import os
 import tempfile
 from typing import Literal
@@ -56,6 +57,18 @@ class Costs:
     max_position_fraction: float = 0.20
     max_daily_loss_fraction: float = 0.03
 
+    def validate(self) -> None:
+        if not 0 <= self.fee_rate <= 0.1:
+            raise ValueError("Fee rate must be between 0 and 10%.")
+        if not math.isfinite(self.slippage_bps) or not 0 <= self.slippage_bps < 10_000:
+            raise ValueError("Slippage bps must be finite and in [0, 10000).")
+        if not 0 < self.maintenance_margin_rate < 1:
+            raise ValueError("Maintenance margin rate must be between 0 and 1.")
+        if not 0 < self.max_position_fraction <= 1:
+            raise ValueError("Position fraction must be in (0, 1].")
+        if not 0 < self.max_daily_loss_fraction <= 1:
+            raise ValueError("Daily loss fraction must be in (0, 1].")
+
 
 def load_portfolio(path: str | Path) -> Portfolio:
     p = Path(path)
@@ -103,8 +116,11 @@ def open_position(portfolio: Portfolio, symbol: str, book: Book, side: Literal["
                   notional_inr: float, market_price: float, costs: Costs = Costs(),
                   hedge_ratio: float = 1.0, source: str = "market") -> Position:
     """Open a paper position. Short and futures books are always simulated."""
-    if symbol not in SYMBOLS or side not in ("long", "short"):
+    if symbol not in SYMBOLS or book not in ("spot", "short", "futures_hedge") or side not in ("long", "short"):
         raise ValueError("Unsupported symbol or side")
+    costs.validate()
+    if not all(math.isfinite(v) for v in (notional_inr, market_price, hedge_ratio)):
+        raise ValueError("Notional, price, and hedge ratio must be finite")
     if not (0 <= hedge_ratio <= 1):
         raise ValueError("Hedge ratio must be between 0 and 1")
     if notional_inr <= 0 or market_price <= 0:
@@ -113,7 +129,7 @@ def open_position(portfolio: Portfolio, symbol: str, book: Book, side: Literal["
         raise ValueError("Spot is long-only; short and futures books simulate short exposure")
     px = slipped_price(market_price, "buy" if side == "long" else "sell", costs.slippage_bps)
     maximum = max(0.0, portfolio.cash_inr) * costs.max_position_fraction
-    if book != "spot":
+    if book == "futures_hedge":
         notional_inr *= hedge_ratio
     notional_inr = min(notional_inr, maximum)
     fee = notional_inr * costs.fee_rate
@@ -134,13 +150,20 @@ def open_position(portfolio: Portfolio, symbol: str, book: Book, side: Literal["
 
 def charge_funding(portfolio: Portfolio, mark_prices: dict[str, float], periods: int = 1,
                    rate_per_8h: float = 0.0001) -> float:
-    """Charge signed funding to the cash balance for synthetic/internal futures simulation."""
-    if periods < 0 or rate_per_8h < 0:
-        raise ValueError("Funding periods and rate cannot be negative")
-    charge = sum(p.quantity * mark_prices[p.symbol] * rate_per_8h * periods
-                 for p in portfolio.positions if p.book == "futures_hedge")
-    portfolio.cash_inr -= charge
-    return charge
+    """Apply signed funding to short futures: positive rates credit shorts, negative debit them.
+
+    Returns funding cost (positive means cash debit; negative means cash credit).
+    """
+    if periods < 0 or not math.isfinite(rate_per_8h):
+        raise ValueError("Periods must be nonnegative and funding rate finite")
+    for p in portfolio.positions:
+        if p.book == "futures_hedge" and (p.symbol not in mark_prices or
+                not math.isfinite(mark_prices[p.symbol]) or mark_prices[p.symbol] <= 0):
+            raise ValueError("A valid mark price is required for every futures position")
+    cost = sum(-p.quantity * mark_prices[p.symbol] * rate_per_8h * periods
+               for p in portfolio.positions if p.book == "futures_hedge")
+    portfolio.cash_inr -= cost
+    return cost
 
 
 def liquidation_price(position: Position, maintenance_rate: float = 0.05) -> float | None:
