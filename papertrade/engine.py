@@ -94,7 +94,8 @@ def equity(portfolio: Portfolio, prices: dict[str, float]) -> float:
         if p.book == "spot":
             value += p.quantity * mark
         else:
-            value += p.margin_inr + p.quantity * (p.entry_price - mark)
+            # Both non-spot books represent short exposure in this MVP.
+            value += p.margin_inr + p.quantity * (mark - p.entry_price)
     return value
 
 
@@ -145,11 +146,11 @@ def charge_funding(portfolio: Portfolio, mark_prices: dict[str, float], periods:
 def liquidation_price(position: Position, maintenance_rate: float = 0.05) -> float | None:
     if position.book == "spot":
         return None
-    # Isolated-margin approximation, with zero fees; not an exchange contract model.
+    # Isolated-margin short approximation, with zero fees; not an exchange contract model.
     if position.quantity <= 0 or not (0 < maintenance_rate < 1):
         raise ValueError("Invalid quantity or maintenance rate")
-    return position.entry_price * (1 - position.margin_inr /
-                                   (position.quantity * position.entry_price) + maintenance_rate)
+    return position.entry_price * (1 + position.margin_inr /
+                                   (position.quantity * position.entry_price) - maintenance_rate)
 
 
 def select_strategy(regime: str, trend: float, volatility: float,
