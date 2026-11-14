@@ -51,3 +51,23 @@ def test_market_adapters_keep_actual_futures_data_labeled(monkeypatch):
     assert futures_data_notice()["available"]
     with pytest.raises(ValueError):
         spot_ohlc("XRP/INR")
+
+
+def test_futures_adapter_falls_back_when_binance_geo_blocks(monkeypatch):
+    class Response:
+        def __init__(self, data, status=200): self.data, self.status = data, status
+        def raise_for_status(self):
+            if self.status >= 400: raise RuntimeError(f"HTTP {self.status}")
+        def json(self): return self.data
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        if "binance" in url: return Response({}, 451)
+        return Response({"retCode": 0, "time": 456, "result": {"list": [{
+            "symbol": "ETHUSDT", "markPrice": "2000", "indexPrice": "1990",
+            "fundingRate": "-0.0001", "nextFundingTime": "789"}]}})
+    monkeypatch.setattr("papertrade.market_data.requests.get", get)
+    result = futures_snapshot("ETH/INR")
+    assert result["exchange"] == "Bybit linear perpetual"
+    assert result["funding_rate"] == pytest.approx(-.0001)
+    assert len(calls) == 2 and "bybit" in calls[1]

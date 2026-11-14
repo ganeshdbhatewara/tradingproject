@@ -17,7 +17,7 @@ python worker.py
 ## Data provenance
 
 - INR spot OHLC for BTC and ETH comes from the public CoinGecko endpoint.
-- Actual USDⓈ-M futures mark/index/funding observations come from Binance public market data, in USDT. The app never represents these as INR futures or uses them as an order feed. API reference: [Binance USDⓈ-M market data](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data).
+- Actual futures mark/index/funding observations come from public Binance USDⓈ-M, with a Bybit linear perpetual fallback, in USDT. If a venue is geo-blocked or unavailable, it is reported as unavailable. The app never represents these as INR futures or uses them as an order feed. API references: [Binance USDⓈ-M market data](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data), [Bybit tickers](https://bybit-exchange.github.io/docs/v5/market/tickers).
 - Simulated INR hedge positions use the observed funding percentage only when the user clicks “Settle one simulated funding period”; funding cashflows are estimates against INR notional, not actual account payments.
 - Pattern labels and regime detection are transparent OHLC heuristics. They are not guarantees or investment advice.
 
