@@ -1,8 +1,9 @@
 import json
 import pytest
 from papertrade.engine import (Costs, Portfolio, charge_funding, equity, load_portfolio,
-                               close_position, check_liquidations, liquidation_price, open_position,
-                               risk_status, save_portfolio, select_strategy, slipped_price, RiskLimitError)
+                               check_protective_exits, close_position, check_liquidations,
+                               liquidation_price, open_position, protection_levels, risk_status,
+                               save_portfolio, select_strategy, slipped_price, RiskLimitError)
 
 
 def test_books_are_separate_and_persist(tmp_path):
@@ -122,3 +123,80 @@ def test_funding_updates_trade_journal_with_signed_cashflow():
     charge_funding(p, {"BTC/INR": 100000}, rate_per_8h=.001, event_id="period-1")
     with pytest.raises(ValueError, match="already been settled"):
         charge_funding(p, {"BTC/INR": 100000}, rate_per_8h=.001, event_id="period-1")
+
+
+def test_long_stop_loss_closes_and_records_protection_reason():
+    p = Portfolio()
+    costs = Costs(fee_rate=0, slippage_bps=0)
+    pos = open_position(p, "BTC/INR", "spot", "long", 1000, 100000, costs,
+                        mark_prices={"BTC/INR": 100000})
+    events = check_protective_exits(p, {"BTC/INR": 97000}, costs)
+    assert len(events) == 1
+    assert events[0]["reason"] == "stop_loss"
+    assert events[0]["stop_loss_fraction"] == pytest.approx(.03)
+    assert not p.positions
+    assert p.tax_ledger[-1]["position_id"] == pos.position_id
+
+
+def test_short_stop_loss_closes_when_market_rises():
+    p = Portfolio()
+    costs = Costs(fee_rate=0, slippage_bps=0)
+    pos = open_position(p, "BTC/INR", "short", "short", 1000, 100000, costs,
+                        mark_prices={"BTC/INR": 100000})
+    events = check_protective_exits(p, {"BTC/INR": 103000}, costs)
+    assert len(events) == 1 and events[0]["reason"] == "stop_loss"
+    assert events[0]["position_id"] == pos.position_id
+    assert not p.positions
+
+
+@pytest.mark.parametrize(("book", "side", "favorable", "reversal"), [
+    ("spot", "long", 102500, 101800),
+    ("short", "short", 97500, 98200),
+    ("futures_hedge", "short", 97500, 98200),
+])
+def test_trailing_stop_closes_long_and_short_books(book, side, favorable, reversal):
+    p = Portfolio()
+    costs = Costs(fee_rate=0, slippage_bps=0)
+    pos = open_position(p, "BTC/INR", book, side, 1000, 100000, costs,
+                        mark_prices={"BTC/INR": 100000})
+    assert check_protective_exits(p, {"BTC/INR": favorable}, costs) == []
+    best = max(favorable, pos.entry_price) if book == "spot" else min(favorable, pos.entry_price)
+    assert pos.best_price_inr == pytest.approx(best)
+    level = protection_levels(pos)
+    assert level["trailing_active"]
+    assert check_protective_exits(p, {"BTC/INR": reversal}, costs) == []
+    # The reversal may still be above/below the trailing threshold; cross it explicitly.
+    trail = protection_levels(pos)["effective_stop_price_inr"]
+    stop_mark = trail - 1 if book == "spot" else trail + 1
+    events = check_protective_exits(p, {"BTC/INR": stop_mark}, costs)
+    assert len(events) == 1 and events[0]["reason"] == "trailing_stop"
+    assert events[0]["best_price_inr"] == pytest.approx(best)
+    assert not p.positions
+
+
+def test_protective_monitor_fails_closed_without_complete_valid_marks():
+    p = Portfolio()
+    pos = open_position(p, "BTC/INR", "spot", "long", 1000, 100000,
+                        Costs(slippage_bps=0), mark_prices={"BTC/INR": 100000})
+    before = pos.best_price_inr
+    with pytest.raises(ValueError, match="Valid current marks"):
+        check_protective_exits(p, {})
+    with pytest.raises(ValueError, match="Valid current marks"):
+        check_protective_exits(p, {"BTC/INR": float("nan")})
+    assert pos.best_price_inr == before and p.positions == [pos]
+
+
+def test_invalid_trailing_rule_is_rejected_and_legacy_state_gets_protection_defaults():
+    p = Portfolio()
+    with pytest.raises(ValueError, match="smaller than trailing activation"):
+        open_position(p, "BTC/INR", "spot", "long", 1000, 100000,
+                      mark_prices={"BTC/INR": 100000},
+                      trailing_activation_fraction=.01, trailing_distance_fraction=.01)
+    restored = Portfolio.from_dict({"positions": [{"position_id": "old", "symbol": "BTC/INR",
+        "book": "spot", "quantity": .01, "entry_price": 100000,
+        "opened_at": "2026-01-01T00:00:00+00:00"}]})
+    old = restored.positions[0]
+    assert old.stop_loss_fraction == pytest.approx(.03)
+    assert old.trailing_activation_fraction == pytest.approx(.02)
+    assert old.trailing_distance_fraction == pytest.approx(.01)
+    assert old.best_price_inr == pytest.approx(old.entry_price)

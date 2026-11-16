@@ -106,7 +106,7 @@ def backtest_ohlc(rows: list[list[float]], strategy: str, train_fraction: float 
         if direction and target != direction:
             exit_px = open_px * (1 - slippage_bps / 10_000 if direction == 1 else 1 + slippage_bps / 10_000)
             exit_fee = units * exit_px * fee_rate
-            pnl = units * (exit_px - entry) * direction - entry_fee - exit_fee
+            pnl = units * (exit_px - entry[0]) * direction - entry_fee - exit_fee
             cash += units * (exit_px - entry[0]) * direction - exit_fee
             trades.append({"entry_index": entry[1], "exit_index": i, "side": "long" if direction == 1 else "short",
                            "pnl_inr": pnl, "fees_inr": entry_fee + exit_fee})
@@ -137,3 +137,65 @@ def backtest_ohlc(rows: list[list[float]], strategy: str, train_fraction: float 
             "out_of_sample_return": (test_equity[-1] / train_equity[-1] - 1) if test_equity and train_equity else 0,
             "trade_count": len(trades), "trades": trades, "equity_curve": equity_curve,
             "assumptions": "no leverage; signals use prior closes; fills use next open; fees/slippage applied; funding excluded"}
+
+
+def multi_pair_strategy_report(pair_rows: dict[str, list[list[float]]],
+                                train_fraction: float = 0.7,
+                                fee_rate: float = 0.001,
+                                slippage_bps: float = 10,
+                                risk_fraction: float = 0.2) -> dict:
+    """Rank strategies on equal-weighted training returns across at least two pairs.
+
+    Out-of-sample returns never rank the candidates; they act as a validation gate.
+    Select cash unless the training winner is also positive out-of-sample.
+    """
+    strategies = ("Trend following", "Breakout", "Mean reversion", "Momentum")
+    usable = {symbol: rows for symbol, rows in pair_rows.items() if len(rows) >= 50}
+    if len(usable) < 2:
+        return {"selected_strategy": None, "candidate_strategy": None,
+                "reason": "Auto selection requires at least two pairs with 50 or more valid candles; staying flat.",
+                "pair_count": len(usable), "available_pairs": list(usable),
+                "ranking": [], "pair_results": [],
+                "ranking_method": "equal-weighted average training return; OOS reserved for validation"}
+
+    pair_results = []
+    for symbol in sorted(usable):
+        for strategy in strategies:
+            result = backtest_ohlc(usable[symbol], strategy,
+                train_fraction=train_fraction, fee_rate=fee_rate,
+                slippage_bps=slippage_bps, risk_fraction=risk_fraction)
+            pair_results.append({"pair": symbol, "strategy": strategy,
+                "train_return": result["train_return"],
+                "out_of_sample_return": result["out_of_sample_return"],
+                "net_return": result["net_return"], "trade_count": result["trade_count"]})
+
+    ranking = []
+    for strategy in strategies:
+        rows = [item for item in pair_results if item["strategy"] == strategy]
+        ranking.append({"strategy": strategy,
+            "average_train_return": sum(item["train_return"] for item in rows) / len(rows),
+            "average_out_of_sample_return": sum(item["out_of_sample_return"] for item in rows) / len(rows),
+            "total_trades": sum(item["trade_count"] for item in rows),
+            "pair_count": len(rows)})
+    ranking.sort(key=lambda item: (-item["average_train_return"], item["strategy"]))
+    best = ranking[0]
+    if best["average_train_return"] <= 0:
+        selected = None
+        reason = (f"No strategy had a positive average training return across {len(usable)} pairs; "
+                  "Auto stays flat. Out-of-sample results are shown for validation only.")
+    elif best["average_out_of_sample_return"] <= 0:
+        selected = None
+        reason = (f"{best['strategy']} had the highest average training return "
+                  f"({best['average_train_return']:.2%}), but its average out-of-sample return "
+                  f"was not positive ({best['average_out_of_sample_return']:.2%}); "
+                  "Auto stays flat pending validation. OOS data was not used to rank candidates.")
+    else:
+        selected = best["strategy"]
+        reason = (f"{selected} had the highest equal-weighted average training return "
+                  f"({best['average_train_return']:.2%}) across {len(usable)} pairs. "
+                  f"Its average out-of-sample return was also positive "
+                  f"({best['average_out_of_sample_return']:.2%}). OOS data was not used to rank it.")
+    return {"selected_strategy": selected, "candidate_strategy": best["strategy"], "reason": reason,
+            "pair_count": len(usable), "available_pairs": sorted(usable),
+            "ranking": ranking, "pair_results": pair_results,
+            "ranking_method": "equal-weighted average training return; OOS reserved for validation"}

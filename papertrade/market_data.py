@@ -1,5 +1,6 @@
 """Public market data adapters. Futures provenance is explicit."""
 from __future__ import annotations
+import math
 import requests
 
 
@@ -12,6 +13,26 @@ def spot_ohlc(symbol: str, days: int = 30) -> list[list[float]]:
                             params={"vs_currency": "inr", "days": days}, timeout=15)
     response.raise_for_status()
     return response.json()
+
+
+def spot_prices() -> dict[str, float]:
+    """Fetch current public INR spot marks for stop checks and simulated fills."""
+    response = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={"ids": "bitcoin,ethereum", "vs_currencies": "inr"}, timeout=15)
+    response.raise_for_status()
+    payload = response.json()
+    mapping = {"BTC/INR": "bitcoin", "ETH/INR": "ethereum"}
+    prices = {}
+    for symbol, coin_id in mapping.items():
+        try:
+            price = float(payload[coin_id]["inr"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"CoinGecko returned no usable INR mark for {symbol}") from exc
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError(f"CoinGecko returned an invalid INR mark for {symbol}")
+        prices[symbol] = price
+    return prices
 
 
 def futures_data_notice() -> dict:
