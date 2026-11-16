@@ -29,6 +29,8 @@ While the Streamlit dashboard is open with paper positions, a browser refresh ch
 
 `papertrade/backtest.py` includes trend-following, breakout, mean-reversion, and momentum signals; a simple OHLC pattern recognizer; fees/slippage in a no-leverage simulator; and fixed-parameter train/out-of-sample reporting. It does not tune parameters on the test set. This is a research tool, not proof of strategy edge.
 
+The dashboard's default Auto selector backtests all four strategies across at least two selected INR pairs. It ranks by equal-weighted average **training** return only. The training winner must also have positive average out-of-sample return to pass validation; otherwise Auto stays flat and explains the failed validation. Out-of-sample data never ranks candidates. If fewer than two pairs have 50 valid bars, or every strategy's average training return is nonpositive, Auto also stays flat. You can still choose a strategy manually or use the separate regime-based Auto mode. Historical returns are not a forecast or guarantee of future profit.
+
 ## Durable cloud portfolio state (Supabase)
 
 Without cloud settings, the app uses atomic local JSON. That is useful locally but is **not durable** on Streamlit Community Cloud or GitHub-hosted runners. For durable state, create the table in Supabase SQL Editor:

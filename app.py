@@ -9,7 +9,7 @@ from papertrade.engine import (Costs, SYMBOLS, charge_funding, check_liquidation
 from papertrade.market_data import futures_data_notice, futures_snapshot, spot_ohlc, spot_prices
 from papertrade.persistence import load_state, save_state
 from papertrade.backtest import (backtest_ohlc, classify_regime, detect_candle_patterns,
-    strategy_signal, walk_forward_returns)
+    multi_pair_strategy_report, strategy_signal, walk_forward_returns)
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Crypto AI Research | Paper Trading", layout="wide")
@@ -88,18 +88,58 @@ for col, symbol in zip(cols, SYMBOLS):
 
 st.subheader("Strategy research")
 strategy_names = ["Trend following", "Breakout", "Mean reversion", "Momentum"]
-mode = st.selectbox("Strategy mode", ["Auto", *strategy_names])
+pair_options = [symbol for symbol in SYMBOLS
+                if symbol in spot_rows and len(spot_rows[symbol]) >= 50]
+strategy_pairs = st.multiselect("Pairs used for automatic strategy selection", pair_options,
+                                default=pair_options)
+try:
+    strategy_report = multi_pair_strategy_report(
+        {symbol: spot_rows[symbol] for symbol in strategy_pairs})
+except Exception as exc:
+    strategy_report = {"selected_strategy": None,
+        "reason": f"Multi-pair backtest unavailable; Auto stays flat. {exc}",
+        "pair_count": 0, "ranking": [], "pair_results": []}
+if strategy_report["ranking"]:
+    st.caption("Auto ranks all four strategies by equal-weighted average training return across the selected pairs. Out-of-sample returns are validation only and do not affect selection.")
+    st.dataframe(pd.DataFrame([{
+        "Strategy": row["strategy"],
+        "Average training return": f"{row['average_train_return']:.2%}",
+        "Average out-of-sample return": f"{row['average_out_of_sample_return']:.2%}",
+        "Trades": row["total_trades"],
+        "Pairs": row["pair_count"],
+    } for row in strategy_report["ranking"]]), use_container_width=True)
+    st.caption("Per-pair results")
+    st.dataframe(pd.DataFrame([{
+        "Pair": row["pair"], "Strategy": row["strategy"],
+        "Training return": f"{row['train_return']:.2%}",
+        "Out-of-sample return": f"{row['out_of_sample_return']:.2%}",
+        "Net return": f"{row['net_return']:.2%}", "Trades": row["trade_count"],
+    } for row in strategy_report["pair_results"]]), use_container_width=True)
+mode_options = ["Auto (best across pairs)", "Auto (market regime)", *strategy_names]
+mode = st.selectbox("Strategy mode", mode_options)
 default_regime = classify_regime(spot_rows["BTC/INR"] and [r[4] for r in spot_rows["BTC/INR"]]) if "BTC/INR" in spot_rows else "uncertain"
-regime_override = st.selectbox("Regime", ["Auto", "trending", "ranging", "volatile", "uncertain"])
+regime_override = (st.selectbox("Regime", ["Auto", "trending", "ranging", "volatile", "uncertain"])
+                   if mode == "Auto (market regime)" else "Auto")
 regime = default_regime if regime_override == "Auto" else regime_override
 closes = [float(r[4]) for r in spot_rows.get("BTC/INR", [])]
 trend = closes[-1] / closes[-21] - 1 if len(closes) >= 21 else 0.0
 volatility = float(pd.Series(closes).pct_change().tail(20).std(ddof=0)) if len(closes) >= 21 else 0.0
-selection = select_strategy(regime, trend, volatility, mode)
-st.write(f"**Auto/selected strategy: {selection['strategy']}** — {selection['reason']}")
+if mode == "Auto (best across pairs)":
+    selection = {"strategy": strategy_report["selected_strategy"],
+                 "reason": strategy_report["reason"]}
+elif mode == "Auto (market regime)":
+    selection = select_strategy(regime, trend, volatility, "Auto")
+else:
+    selection = select_strategy(regime, trend, volatility, mode)
+if selection["strategy"]:
+    st.write(f"**Selected strategy: {selection['strategy']}** — {selection['reason']}")
+else:
+    st.warning(f"**No strategy selected; Auto stays flat.** {selection['reason']}")
 for name in strategy_names:
     st.caption(f"{name}: {strategy_signal(name, closes) if len(closes) >= 21 else 0:+d} signal (−1 short, 0 flat, +1 long)")
-backtest_strategy = st.selectbox("Backtest strategy", strategy_names, index=strategy_names.index(selection["strategy"]))
+backtest_default = selection["strategy"] or strategy_names[0]
+backtest_strategy = st.selectbox("Backtest strategy", strategy_names,
+                                 index=strategy_names.index(backtest_default))
 backtest_symbol = st.selectbox("Backtest asset", SYMBOLS, key="backtest_asset")
 if backtest_symbol in spot_rows and len(spot_rows[backtest_symbol]) >= 50:
     try:
@@ -165,9 +205,11 @@ if submit:
 st.write("Automatic signal to simulated position")
 auto_symbol = st.selectbox("Signal asset", SYMBOLS, key="auto_signal_asset")
 auto_closes = [float(r[4]) for r in spot_rows.get(auto_symbol, [])]
-auto_signal = strategy_signal(selection["strategy"], auto_closes) if len(auto_closes) >= 21 else 0
+auto_signal = (strategy_signal(selection["strategy"], auto_closes)
+               if selection["strategy"] and len(auto_closes) >= 21 else 0)
 signal_label = {1: "bullish · open a simulated spot long", -1: "bearish · open a simulated short", 0: "flat · no position"}[auto_signal]
-st.caption(f"{selection['strategy']} signal: {signal_label}")
+strategy_label = selection["strategy"] or "No strategy (cash)"
+st.caption(f"{strategy_label} signal: {signal_label}")
 auto_amount = st.number_input("Automatic signal notional (INR)", min_value=100.0,
                               max_value=4000.0, value=1000.0, step=100.0, key="auto_amount")
 if st.button("Execute signal in paper portfolio", disabled=auto_signal == 0 or auto_symbol not in prices or bool(status and status.get("halted"))):

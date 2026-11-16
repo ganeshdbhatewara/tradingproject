@@ -1,6 +1,8 @@
 import pytest
+import papertrade.backtest as backtest_module
 from papertrade.backtest import (backtest_ohlc, detect_candle_patterns,
-                                 strategy_signal, walk_forward_returns)
+                                 multi_pair_strategy_report, strategy_signal,
+                                 walk_forward_returns)
 from papertrade.market_data import futures_data_notice, futures_snapshot, spot_ohlc
 
 
@@ -81,3 +83,51 @@ def test_futures_adapter_falls_back_when_binance_geo_blocks(monkeypatch):
     assert result["exchange"] == "Bybit linear perpetual"
     assert result["funding_rate"] == pytest.approx(-.0001)
     assert len(calls) == 2 and "bybit" in calls[1]
+
+
+def test_multi_pair_selector_ranks_by_training_not_out_of_sample(monkeypatch):
+    values = {
+        "Trend following": (.10, -.30),
+        "Breakout": (.02, .50),
+        "Mean reversion": (-.01, 0.0),
+        "Momentum": (.05, .20),
+    }
+
+    def fake_backtest(rows, strategy, **kwargs):
+        train, oos = values[strategy]
+        return {"train_return": train, "out_of_sample_return": oos,
+                "net_return": train + oos, "trade_count": 2}
+
+    monkeypatch.setattr(backtest_module, "backtest_ohlc", fake_backtest)
+    report = multi_pair_strategy_report({"BTC/INR": _rows(), "ETH/INR": _rows()})
+    assert report["candidate_strategy"] == "Trend following"
+    assert report["selected_strategy"] is None  # negative OOS performance fails validation
+    assert report["ranking"][0]["average_train_return"] == pytest.approx(.10)
+    assert report["ranking"][0]["average_out_of_sample_return"] == pytest.approx(-.30)
+    assert len(report["pair_results"]) == 8
+    assert "stays flat pending validation" in report["reason"]
+    assert "OOS data was not used to rank" in report["reason"]
+
+
+def test_multi_pair_selector_stays_flat_without_two_pairs_or_positive_training(monkeypatch):
+    insufficient = multi_pair_strategy_report({"BTC/INR": _rows()})
+    assert insufficient["selected_strategy"] is None
+    assert "at least two pairs" in insufficient["reason"]
+
+    monkeypatch.setattr(backtest_module, "backtest_ohlc", lambda *args, **kwargs: {
+        "train_return": -.01, "out_of_sample_return": .5, "net_return": .4,
+        "trade_count": 1,
+    })
+    losing = multi_pair_strategy_report({"BTC/INR": _rows(), "ETH/INR": _rows()})
+    assert losing["selected_strategy"] is None
+    assert "stays flat" in losing["reason"]
+
+
+def test_multi_pair_selector_uses_training_winner_when_oos_also_validates(monkeypatch):
+    monkeypatch.setattr(backtest_module, "backtest_ohlc", lambda *args, **kwargs: {
+        "train_return": .02, "out_of_sample_return": .01, "net_return": .03,
+        "trade_count": 1,
+    })
+    report = multi_pair_strategy_report({"BTC/INR": _rows(), "ETH/INR": _rows()})
+    assert report["candidate_strategy"] == report["selected_strategy"]
+    assert report["selected_strategy"] == "Breakout"  # deterministic tie-break
