@@ -27,6 +27,14 @@ class Position:
     margin_inr: float = 0.0
     entry_fee_inr: float = 0.0
     funding_inr: float = 0.0
+    stop_loss_fraction: float = 0.03
+    trailing_activation_fraction: float = 0.02
+    trailing_distance_fraction: float = 0.01
+    best_price_inr: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.best_price_inr is None:
+            self.best_price_inr = self.entry_price
 
 
 @dataclass
@@ -48,6 +56,10 @@ class Portfolio:
             item.setdefault("position_id", str(uuid4()))
             item.setdefault("entry_fee_inr", 0.0)
             item.setdefault("funding_inr", 0.0)
+            item.setdefault("stop_loss_fraction", 0.03)
+            item.setdefault("trailing_activation_fraction", 0.02)
+            item.setdefault("trailing_distance_fraction", 0.01)
+            item.setdefault("best_price_inr", item.get("entry_price"))
             positions.append(Position(**item))
         return cls(
             cash_inr=float(raw.get("cash_inr", INITIAL_INR)),
@@ -166,13 +178,18 @@ def risk_status(portfolio: Portfolio, prices: dict[str, float], costs: Costs = C
 def open_position(portfolio: Portfolio, symbol: str, book: Book, side: Literal["long", "short"],
                   notional_inr: float, market_price: float, costs: Costs = Costs(),
                   hedge_ratio: float = 1.0, source: str = "market",
-                  mark_prices: dict[str, float] | None = None) -> Position:
+                  mark_prices: dict[str, float] | None = None,
+                  stop_loss_fraction: float = 0.03,
+                  trailing_activation_fraction: float = 0.02,
+                  trailing_distance_fraction: float = 0.01) -> Position:
     """Open a paper position. Short and futures books are always simulated."""
     if symbol not in SYMBOLS or book not in ("spot", "short", "futures_hedge") or side not in ("long", "short"):
         raise ValueError("Unsupported symbol or side")
     costs.validate()
     if not all(math.isfinite(v) for v in (notional_inr, market_price, hedge_ratio)):
         raise ValueError("Notional, price, and hedge ratio must be finite")
+    _validate_protection_rules(stop_loss_fraction, trailing_activation_fraction,
+                               trailing_distance_fraction)
     if not (0 <= hedge_ratio <= 1):
         raise ValueError("Hedge ratio must be between 0 and 1")
     if notional_inr <= 0 or market_price <= 0:
@@ -198,12 +215,17 @@ def open_position(portfolio: Portfolio, symbol: str, book: Book, side: Literal["
         raise ValueError("Insufficient available cash/margin")
     portfolio.cash_inr -= debit
     pos = Position(str(uuid4()), symbol, book, notional_inr / px, px,
-                   datetime.now(timezone.utc).isoformat(), margin, fee)
+                   datetime.now(timezone.utc).isoformat(), margin, fee,
+                   0.0, stop_loss_fraction, trailing_activation_fraction,
+                   trailing_distance_fraction, px)
     portfolio.positions.append(pos)
     portfolio.trades.append({"time": pos.opened_at, "symbol": symbol, "book": book,
         "side": side, "quantity": pos.quantity, "price_inr": px, "fee_inr": fee,
         "funding_inr": 0.0, "slippage_bps": costs.slippage_bps, "source": source,
         "hedge_ratio": hedge_ratio if book == "futures_hedge" else None,
+        "stop_loss_fraction": stop_loss_fraction,
+        "trailing_activation_fraction": trailing_activation_fraction,
+        "trailing_distance_fraction": trailing_distance_fraction,
         "position_id": pos.position_id, "status": "open"})
     return pos
 
@@ -241,6 +263,10 @@ def close_position(portfolio: Portfolio, position_id: str, market_price: float,
              "proceeds_inr": proceeds, "cost_basis_inr": basis,
              "entry_fee_inr": entry_fee, "exit_fee_inr": close_fee,
              "funding_inr": funding, "realized_pnl_inr": pnl, "tax_due_inr": None,
+             "best_price_inr": pos.best_price_inr,
+             "stop_loss_fraction": pos.stop_loss_fraction,
+             "trailing_activation_fraction": pos.trailing_activation_fraction,
+             "trailing_distance_fraction": pos.trailing_distance_fraction,
              "tax_note": "Tax due not calculated; ledger values are informational only.",
              "reason": reason}
     portfolio.tax_ledger.append(event)
@@ -271,6 +297,71 @@ def check_liquidations(portfolio: Portfolio, mark_prices: dict[str, float],
         if mark_prices[pos.symbol] >= threshold:
             closed.append(close_position(portfolio, pos.position_id, mark_prices[pos.symbol],
                                          costs, reason="simulated_liquidation"))
+    return closed
+
+
+def _validate_protection_rules(stop_loss_fraction: float, activation_fraction: float,
+                               trailing_distance_fraction: float) -> None:
+    values = (stop_loss_fraction, activation_fraction, trailing_distance_fraction)
+    if any(not math.isfinite(x) or not 0 < x < 1 for x in values):
+        raise ValueError("Stop loss, trailing activation, and trailing distance must be finite fractions in (0, 1).")
+    if trailing_distance_fraction >= activation_fraction:
+        raise ValueError("Trailing distance must be smaller than trailing activation to protect a favorable move.")
+
+
+def protection_levels(position: Position) -> dict:
+    """Return the current hard stop and, after activation, the favorable trailing stop."""
+    _validate_protection_rules(position.stop_loss_fraction,
+                               position.trailing_activation_fraction,
+                               position.trailing_distance_fraction)
+    is_long = position.book == "spot"
+    best = position.best_price_inr if position.best_price_inr is not None else position.entry_price
+    stop_loss = position.entry_price * (1 - position.stop_loss_fraction if is_long
+                                        else 1 + position.stop_loss_fraction)
+    active = (best >= position.entry_price * (1 + position.trailing_activation_fraction)
+              if is_long else
+              best <= position.entry_price * (1 - position.trailing_activation_fraction))
+    trailing = (best * (1 - position.trailing_distance_fraction if is_long
+                         else 1 + position.trailing_distance_fraction)) if active else None
+    effective = (max(stop_loss, trailing) if is_long else min(stop_loss, trailing)) if active else stop_loss
+    return {"stop_loss_price_inr": stop_loss, "trailing_active": active,
+            "trailing_stop_price_inr": trailing, "effective_stop_price_inr": effective,
+            "best_price_inr": best}
+
+
+def check_protective_exits(portfolio: Portfolio, mark_prices: dict[str, float],
+                           costs: Costs = Costs()) -> list[dict]:
+    """Update favorable-water marks and close positions crossing simulated protective stops.
+
+    Call on each fresh spot-price refresh. Long spot positions trail their highs;
+    simulated short books trail their lows. Missing/invalid marks fail closed before
+    any watermark or position is changed.
+    """
+    costs.validate()
+    required = {p.symbol for p in portfolio.positions}
+    if not required.issubset(mark_prices) or any(
+            not math.isfinite(mark_prices[s]) or mark_prices[s] <= 0 for s in required):
+        raise ValueError("Valid current marks are required for every open position")
+    for pos in portfolio.positions:
+        _validate_protection_rules(pos.stop_loss_fraction, pos.trailing_activation_fraction,
+                                   pos.trailing_distance_fraction)
+
+    closed = []
+    for pos in list(portfolio.positions):
+        mark = mark_prices[pos.symbol]
+        is_long = pos.book == "spot"
+        best = pos.best_price_inr if pos.best_price_inr is not None else pos.entry_price
+        pos.best_price_inr = max(best, mark) if is_long else min(best, mark)
+        levels = protection_levels(pos)
+        triggered = (mark <= levels["effective_stop_price_inr"] if is_long
+                     else mark >= levels["effective_stop_price_inr"])
+        if not triggered:
+            continue
+        trailing_is_tighter = levels["trailing_active"] and (
+            levels["trailing_stop_price_inr"] > levels["stop_loss_price_inr"] if is_long else
+            levels["trailing_stop_price_inr"] < levels["stop_loss_price_inr"])
+        reason = "trailing_stop" if trailing_is_tighter else "stop_loss"
+        closed.append(close_position(portfolio, pos.position_id, mark, costs, reason=reason))
     return closed
 
 

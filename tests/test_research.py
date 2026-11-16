@@ -38,6 +38,16 @@ def test_strategy_signals_and_backtest_are_bounded_and_net_of_costs():
         backtest_ohlc(rows[:20], "Momentum")
 
 
+def test_backtest_closes_a_position_when_trend_reverses():
+    rows = []
+    for i in range(120):
+        close = 100 + i if i < 50 else 150 - 2 * (i - 50)
+        rows.append([i * 60_000, close, close + 1, close - 1, close])
+    result = backtest_ohlc(rows, "Trend following", fee_rate=0, slippage_bps=0)
+    assert result["trade_count"] >= 2
+    assert {trade["side"] for trade in result["trades"]} == {"long", "short"}
+
+
 def test_market_adapters_keep_actual_futures_data_labeled(monkeypatch):
     class Response:
         def raise_for_status(self): pass

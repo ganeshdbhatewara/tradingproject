@@ -106,7 +106,7 @@ def backtest_ohlc(rows: list[list[float]], strategy: str, train_fraction: float 
         if direction and target != direction:
             exit_px = open_px * (1 - slippage_bps / 10_000 if direction == 1 else 1 + slippage_bps / 10_000)
             exit_fee = units * exit_px * fee_rate
-            pnl = units * (exit_px - entry) * direction - entry_fee - exit_fee
+            pnl = units * (exit_px - entry[0]) * direction - entry_fee - exit_fee
             cash += units * (exit_px - entry[0]) * direction - exit_fee
             trades.append({"entry_index": entry[1], "exit_index": i, "side": "long" if direction == 1 else "short",
                            "pnl_inr": pnl, "fees_inr": entry_fee + exit_fee})
